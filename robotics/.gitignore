@@ -1,0 +1,10 @@
+﻿__pycache__/
+*.pyc
+runs/
+vial_dataset/
+vial_photos/
+yolov8n.pt
+*.jpg
+*.png
+*.pt
+.DS_Store

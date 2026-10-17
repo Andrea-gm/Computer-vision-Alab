@@ -1,0 +1,9 @@
+build/
+install/
+log/
+.pixi/
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
+_run_out.txt
+_run_err.txt

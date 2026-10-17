@@ -1,0 +1,57 @@
+# Environments / caches
+.pixi/
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
+.Python
+.venv/
+venv/
+.env
+.env.*
+
+# ROS build artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+**/_smoke_logs/
+**/log/
+
+# Local scratch / agent dumps
+agent_temp/
+**/agent_temp/
+*.log
+*.tmp
+_run_out.txt
+_run_err.txt
+
+# Heavy ML / capture data (keep code + configs)
+**/*.pt
+**/*.onnx
+**/*.engine
+robotics/runs/
+robotics/vial_dataset/
+robotics/vial_photos/
+**/yolov8n.pt
+
+# Captured frames (configs/json stay)
+*.jpg
+*.jpeg
+*.png
+!**/templates/**/*.png
+!robotics/**/template*.png
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Duplicate / scratch trees
+Might be working/
+gdi/
+
+# nested git leftover
+**/.git_nested_backup/
+
+robotics/_git_backup_nested/
+

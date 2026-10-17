@@ -1,0 +1,10 @@
+{
+  "ok": false,
+  "agent": "CaptureAgent",
+  "paths": [],
+  "source": "ros",
+  "n": 0,
+  "topic": "/orbbec/cam1/color/image_raw",
+  "errors": [],
+  "error": "no frames"
+}

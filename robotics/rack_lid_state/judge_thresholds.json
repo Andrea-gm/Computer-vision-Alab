@@ -1,0 +1,14 @@
+{
+  "closed_threshold": 0.75,
+  "open_threshold": 0.55,
+  "open_weak_threshold": 0.45,
+  "closed_not_closed_max": 0.7,
+  "max_open_exemplars": 32,
+  "weights": {
+    "gray": 0.55,
+    "edge": 0.3,
+    "hist": 0.15
+  },
+  "updated_by": "TrainAgent_open_variant",
+  "ts": "2026-10-15T17:10:32"
+}

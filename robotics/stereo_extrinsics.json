@@ -1,0 +1,39 @@
+{
+  "from_camera": 0,
+  "to_camera": 1,
+  "R": [
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "t_mm": [
+    120.0,
+    0.0,
+    0.0
+  ],
+  "K0": [
+    640.0000000000001,
+    640.0000000000001,
+    640.0,
+    400.0
+  ],
+  "K1": [
+    640.0000000000001,
+    640.0000000000001,
+    640.0,
+    400.0
+  ],
+  "notes": "PLACEHOLDER \u2014 replace R,t after ChArUco/chessboard stereoCalibrate. t_mm is a rough baseline guess along +X; identity R is wrong for angled mounts."
+}

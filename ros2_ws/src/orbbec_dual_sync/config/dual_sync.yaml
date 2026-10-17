@@ -1,0 +1,123 @@
+# Installed to share/orbbec_dual_sync/config/dual_sync.yaml after colcon build.
+# Loaded by dual_sync_detect.launch.py via parameters=[config_path].
+# Node names below must match the names= in the launch file.
+
+orbbec_cam0_pub:
+  ros__parameters:
+    camera_index: 0
+    frame_id: orbbec_cam0
+    # Keep USB/DDS pressure below the cameras' practical frame rate.
+    publish_rate_hz: 6.0
+    publish_depth: true
+    publish_camera_info: true
+    # Raw per-camera USB window (optional). Leave false; UI is orbbec_sync_detect preview.
+    show_preview: false
+    # Launch also TimerAction-staggers cam1; keep 0 here for cam0.
+    open_delay_s: 0.0
+    color_topic: /orbbec/cam0/color/image_raw
+    depth_topic: /orbbec/cam0/depth/image_raw
+    info_topic: /orbbec/cam0/color/camera_info
+
+orbbec_cam1_pub:
+  ros__parameters:
+    camera_index: 1
+    frame_id: orbbec_cam1
+    publish_rate_hz: 6.0
+    publish_depth: true
+    publish_camera_info: true
+    # Raw per-camera USB window (optional). Leave false; UI is orbbec_sync_detect preview.
+    show_preview: false
+    # Backup stagger if launch TimerAction is bypassed (node started alone).
+    open_delay_s: 0.0
+    color_topic: /orbbec/cam1/color/image_raw
+    depth_topic: /orbbec/cam1/depth/image_raw
+    info_topic: /orbbec/cam1/color/camera_info
+
+orbbec_dual_view:
+  ros__parameters:
+    cam0_color_topic: /orbbec/cam0/color/image_raw
+    cam1_color_topic: /orbbec/cam1/color/image_raw
+    max_height: 480
+    refresh_hz: 15.0
+    # Furnace boxes/labels on cam0 (furnace_state/furnace.json, up to 4 slots).
+    enable_furnace_cv: true
+    furnace_json: ""
+    furnace_match_live: true
+    furnace_match_every_n: 2
+    # Same rack OPEN/CLOSED CV as orbbec_rack_overlay, on the cam1 pane.
+    enable_rack_cv: true
+    rack_json: ""
+    state_mode: classify
+    force_state: CLOSED
+    classify_every_n: 2
+    # YOLO arm boxes on both panes (robotics/arm_state/.../best.pt).
+    enable_arm_cv: true
+    arm_weights: ""
+    arm_conf: 0.25
+    arm_every_n: 3
+    # Pale baby-blue HSV mask tracker (UR joint plastic; no neural net).
+    enable_blue_cv: true
+    blue_show_mask: true
+    blue_min_area: 280
+    blue_every_n: 1
+    # Big red ERROR when a blue joint is within this 3D distance of black equipment.
+    blue_proximity_mm: 100.0
+
+orbbec_furnace_overlay:
+  ros__parameters:
+    color_topic: /orbbec/cam0/color/image_raw
+    # Empty -> robotics/furnace_state/furnace.json via ORBBEC_CAMERA_ROOT.
+    furnace_json: ""
+    show_preview: true
+    match_live: true
+    match_every_n: 2
+    save_dir: ""
+    save_every_n: 0
+
+orbbec_rack_overlay:
+  ros__parameters:
+    color_topic: /orbbec/cam1/color/image_raw
+    # Empty -> robotics/rack_lid_state/rack.json via ORBBEC_CAMERA_ROOT.
+    rack_json: ""
+    show_preview: true
+    # classify = JudgeAgent OPEN/CLOSED (default). Pin with force_open/force_closed.
+    state_mode: classify
+    force_state: CLOSED
+    save_dir: ""
+    save_every_n: 0
+
+orbbec_sync_detect:
+  ros__parameters:
+    # ApproximateTime slop (seconds). These free-running USB Orbbecs deliver
+    # near 3 Hz in practice, so their phase can differ by substantially more
+    # than 50 ms even though both stamps use the same wall clock.
+    slop_s: 0.20
+    # The detector worker accepts one pair at a time; stale RGB-D frames have
+    # no value and retaining them multiplies native/DDS memory pressure.
+    queue_size: 2
+    cam0_color_topic: /orbbec/cam0/color/image_raw
+    cam0_depth_topic: /orbbec/cam0/depth/image_raw
+    cam1_color_topic: /orbbec/cam1/color/image_raw
+    cam1_depth_topic: /orbbec/cam1/depth/image_raw
+    # Side-by-side annotated synced cams via launch-safe tkinter. HighGUI stays
+    # opt-in with ORBBEC_PREVIEW_CV2=1 because probing it can natively terminate
+    # a ros2-launch child (exit 3/-1) on Windows. Q / close hides only the UI.
+    # The launch argument preview:=false overrides this for headless sessions.
+    show_preview: true
+    save_synced_dir: ""
+    corroborate_abs_cm: 3.0
+    corroborate_rel: 0.15
+    weak_camera: 0
+    # Hard default: no vial YOLO / local locate / boxes. Launch also skips
+    # starting this node unless enable_detect:=true.
+    enable_detect: false
+    # Only meaningful when enable_detect is true. YOLO remains opt-in.
+    use_yolo: false
+    # Stabilize dual_sync recall: apply the permissive clear-vial/shape profile
+    # independently to both YOLO views. This does not copy or infer a box from
+    # the sibling camera; each image must still produce/validate its own box.
+    symmetric_yolo_gates: true
+    # Empty deliberately uses depthcamera.find_weights, whose first choice is
+    # ORBBEC_CAMERA_ROOT/runs/vial-live/weights/best.pt after the folder split.
+    model: ""
+    stats_topic: /orbbec/sync_detect/stats
