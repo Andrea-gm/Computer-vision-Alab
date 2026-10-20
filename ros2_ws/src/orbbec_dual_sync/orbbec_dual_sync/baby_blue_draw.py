@@ -23,6 +23,13 @@ DEFAULT_BLACK_V_MAX = 58
 DEFAULT_BLACK_S_MAX = 255
 DEFAULT_SILVER_HSV_LO = (85, 22, 105)
 DEFAULT_SILVER_HSV_HI = (115, 100, 220)
+# Physical height of the cam1 jar rack (black face) for similar-triangles range.
+DEFAULT_RACK_HEIGHT_MM = 400.0  # 40 cm
+# Purple tape sits on the pedestal next to J0. Hue stops before red (H~170+).
+# Do not require B>R — the tape is magenta (R slightly above B, G lowest).
+# Cam1 often sees a smaller / less saturated strip — keep S a bit loose.
+DEFAULT_PURPLE_HSV_LO = (150, 45, 80)
+DEFAULT_PURPLE_HSV_HI = (168, 255, 255)
 BOX_COLOR = (255, 220, 80)
 MASK_TINT = (255, 200, 60)
 ALERT_COLOR = (0, 0, 255)  # BGR red
@@ -40,6 +47,73 @@ def baby_blue_mask(
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
     return mask
+
+
+def purple_tape_mask(
+    bgr: np.ndarray,
+    *,
+    hsv_lo: tuple[int, int, int] = DEFAULT_PURPLE_HSV_LO,
+    hsv_hi: tuple[int, int, int] = DEFAULT_PURPLE_HSV_HI,
+) -> np.ndarray:
+    """Mask for the purple tape strip. That strip is the cell origin (0,0)."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array(hsv_lo, np.uint8), np.array(hsv_hi, np.uint8))
+    # Magenta tape: green is the darkest channel. Strong red has R >> B.
+    b, g, r = cv2.split(bgr)
+    bi = b.astype(np.int16)
+    gi = g.astype(np.int16)
+    ri = r.astype(np.int16)
+    magenta = ((gi + 12) < bi) & ((gi + 12) < ri) & ((ri - bi) < 60)
+    mask = cv2.bitwise_and(mask, magenta.astype(np.uint8) * 255)
+    # Soft close only — OPEN erases the tiny strip seen by the other camera.
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 4), np.uint8))
+    return mask
+
+
+def find_purple_tape(
+    bgr: np.ndarray,
+    *,
+    min_area: int = 20,
+    depth_mm: Optional[np.ndarray] = None,
+    near_xy: Optional[tuple[float, float]] = None,
+    max_dist_px: float = 160.0,
+) -> Optional[tuple[int, int, int, int, Optional[float]]]:
+    """Largest purple-tape blob near the base. Far red/purple edges ignored.
+
+    If ``near_xy`` is missing, prefer the lower half of the frame (pedestal).
+    """
+    mask = purple_tape_mask(bgr)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    best_score = -1.0
+    fh, fw = bgr.shape[:2]
+    if near_xy is None:
+        nx, ny = 0.5 * fw, 0.72 * fh
+        max_dist_px = max(float(max_dist_px), 0.35 * float(max(fh, fw)))
+    else:
+        nx, ny = float(near_xy[0]), float(near_xy[1])
+    for c in cnts:
+        x, y, w, h = cv2.boundingRect(c)
+        area = float(max(cv2.contourArea(c), w * h * 0.6))
+        if area < float(min_area):
+            continue
+        # Other camera often sees a short / tiny horizontal band.
+        if w < 3 or h < 2:
+            continue
+        cx, cy = x + 0.5 * w, y + 0.5 * h
+        dist2 = (cx - nx) ** 2 + (cy - ny) ** 2
+        if dist2 > float(max_dist_px) ** 2:
+            continue
+        aspect = max(w, h) / max(1.0, float(min(w, h)))
+        if aspect < 1.1 and area < 40:
+            continue
+        score = area - 0.02 * dist2
+        if score <= best_score:
+            continue
+        best_score = score
+        d = median_depth_mm(depth_mm, x, y, w, h, mask=mask) if depth_mm is not None else None
+        best = (int(x), int(y), int(w), int(h), d)
+    return best
 
 
 def median_depth_mm(
@@ -212,6 +286,18 @@ def _blue_point_mm(
     )
 
 
+def depth_from_known_height_mm(
+    pixel_h: float,
+    real_h_mm: float = DEFAULT_RACK_HEIGHT_MM,
+    *,
+    fy_px: float = 520.0,
+) -> Optional[float]:
+    """Range (mm) from similar triangles: Z = fy * H_real / H_pixels."""
+    if pixel_h < 8.0 or real_h_mm <= 0 or fy_px <= 0:
+        return None
+    return float(fy_px) * float(real_h_mm) / float(pixel_h)
+
+
 def proximity_alerts(
     depth_mm: Optional[np.ndarray],
     boxes: list[tuple[int, int, int, int, Optional[float]]],
@@ -223,11 +309,18 @@ def proximity_alerts(
     skip_base: bool = True,
     black_v_max: int = DEFAULT_BLACK_V_MAX,
     search_px: int = 180,
+    rack_xywh: Optional[tuple[int, int, int, int]] = None,
+    rack_height_mm: float = DEFAULT_RACK_HEIGHT_MM,
 ) -> list[tuple[int, int, int, int, float, str]]:
     """Alert when a non-base blue joint is within ``thresh_mm`` of equipment.
 
     Hidden obstacle mask = black + cool silver/aluminum. Distance uses each
     pixel's own depth (similar triangles / pinhole). Arm body is carved out.
+
+    For the cam1 jar rack, pass ``rack_xywh`` + known physical height (40 cm).
+    Rack-plane depth is then Z = fy * 400mm / rack_pixel_h so an arm that only
+    *looks* in front of the rack in 2D does not false-alarm when the rack is
+    much farther in Z.
 
     Returns (x, y, w, h, gap_mm, label).
     """
@@ -241,13 +334,23 @@ def proximity_alerts(
     fy = fx
     cx_f, cy_f = 0.5 * dw, 0.5 * dh
 
+    z_rack: Optional[float] = None
+    rack_box: Optional[tuple[int, int, int, int]] = None
+    if rack_xywh is not None and len(rack_xywh) == 4:
+        rx, ry, rw, rh = (int(v) for v in rack_xywh)
+        if rw > 0 and rh > 0:
+            rack_box = (rx, ry, rw, rh)
+            z_rack = depth_from_known_height_mm(
+                float(rh), float(rack_height_mm), fy_px=fy
+            )
+
     equip = equipment_obstacle_mask(bgr, black_v_max=black_v_max)
     body = _robot_body_mask(bgr)
     # Carve out the arm (grey + blue) so cables / joint plastic don't alarm
     arm = cv2.bitwise_or(body, blue_mask)
     arm = cv2.dilate(arm, np.ones((21, 21), np.uint8), iterations=1)
     obstacle = cv2.bitwise_and(equip, cv2.bitwise_not(arm))
-    if cv2.countNonZero(obstacle) < 40:
+    if cv2.countNonZero(obstacle) < 40 and z_rack is None:
         return []
 
     alerts: list[tuple[int, int, int, int, float, str]] = []
@@ -260,36 +363,193 @@ def proximity_alerts(
         )
         if bp is None:
             continue
-        p_blue, _d_blue_f = bp
+        p_blue, d_blue_f = bp
+        best: Optional[float] = None
+        best_label = "equip"
+
+        # Explicit blue ↔ rack plane check using similar-triangles rack depth
+        if rack_box is not None and z_rack is not None:
+            rx, ry, rw, rh = rack_box
+            # Sample a few points on the rack face at fixed Z_rack
+            rack_pts = (
+                (rx + 0.5 * rw, ry + 0.5 * rh),
+                (rx + 0.15 * rw, ry + 0.2 * rh),
+                (rx + 0.85 * rw, ry + 0.2 * rh),
+                (rx + 0.15 * rw, ry + 0.8 * rh),
+                (rx + 0.85 * rw, ry + 0.8 * rh),
+            )
+            for uu, vv in rack_pts:
+                p_rack = _unproject_mm(
+                    float(uu), float(vv), float(z_rack), fx=fx, fy=fy, cx=cx_f, cy=cy_f
+                )
+                gap_r = _dist3d_mm(p_blue, p_rack)
+                if best is None or gap_r < best:
+                    best = gap_r
+                    best_label = "rack"
+
         x0 = max(0, x - rad)
         y0 = max(0, y - rad)
         x1 = min(dw, x + w + rad)
         y1 = min(dh, y + h + rad)
         d_roi = depth_mm[y0:y1, x0:x1].astype(np.float32)
-        o_roi = obstacle[y0:y1, x0:x1]
-        ys, xs = np.where(
-            (o_roi > 0)
-            & np.isfinite(d_roi)
-            & (d_roi > 50.0)
-            & (d_roi < 8000.0)
-        )
-        if xs.size < 12:
-            continue
-        step = max(1, xs.size // 250)
-        xs_s = xs[::step]
-        ys_s = ys[::step]
-        best: Optional[float] = None
-        for i in range(xs_s.size):
-            u = float(xs_s[i] + x0)
-            v = float(ys_s[i] + y0)
-            z = float(d_roi[ys_s[i], xs_s[i]])
-            p_obs = _unproject_mm(u, v, z, fx=fx, fy=fy, cx=cx_f, cy=cy_f)
-            gap = _dist3d_mm(p_blue, p_obs)
-            if best is None or gap < best:
-                best = gap
+        o_roi = obstacle[y0:y1, x0:x1] if obstacle.size else None
+        if o_roi is not None:
+            ys, xs = np.where(
+                (o_roi > 0)
+                & np.isfinite(d_roi)
+                & (d_roi > 50.0)
+                & (d_roi < 8000.0)
+            )
+        else:
+            ys = np.array([], dtype=np.int32)
+            xs = np.array([], dtype=np.int32)
+        if xs.size >= 12:
+            step = max(1, xs.size // 250)
+            xs_s = xs[::step]
+            ys_s = ys[::step]
+            for i in range(xs_s.size):
+                u = float(xs_s[i] + x0)
+                v = float(ys_s[i] + y0)
+                z = float(d_roi[ys_s[i], xs_s[i]])
+                # Inside the rack ROI: ignore depth-camera hits on the arm and
+                # use the similar-triangles rack range instead.
+                if (
+                    rack_box is not None
+                    and z_rack is not None
+                    and rack_box[0] <= u < rack_box[0] + rack_box[2]
+                    and rack_box[1] <= v < rack_box[1] + rack_box[3]
+                ):
+                    z = float(z_rack)
+                    label = "rack"
+                else:
+                    label = "equip"
+                    # Depths nearly identical to the blue joint are usually the
+                    # same foreground object (arm / cable), not the distant rack.
+                    if abs(z - d_blue_f) < 40.0:
+                        continue
+                p_obs = _unproject_mm(u, v, z, fx=fx, fy=fy, cx=cx_f, cy=cy_f)
+                gap = _dist3d_mm(p_blue, p_obs)
+                if best is None or gap < best:
+                    best = gap
+                    best_label = label
         if best is not None and best <= float(thresh_mm):
-            alerts.append((int(x), int(y), int(w), int(h), float(best), "equip"))
+            alerts.append(
+                (int(x), int(y), int(w), int(h), float(best), best_label)
+            )
     return alerts
+
+
+def retreat_guidance_toward_base(
+    depth_mm: Optional[np.ndarray],
+    boxes: list[tuple[int, int, int, int, Optional[float]]],
+    blue_mask: np.ndarray,
+    alerts: list,
+    *,
+    fx_px: float = 520.0,
+) -> Optional[str]:
+    """Human instruction: move the alerting joint toward the robot base (zero).
+
+    Uses the lowest blue blob (pedestal / base joint) as a live landmark for
+    ``ur_base`` in this camera until full T_base_cam transforms exist.
+    Camera axes: +X right in image, +Y down in image, +Z away from camera.
+    """
+    if depth_mm is None or depth_mm.size == 0 or not boxes or not alerts:
+        return None
+    dh, dw = depth_mm.shape[:2]
+    fx = max(50.0, float(fx_px))
+    fy = fx
+    cx_f, cy_f = 0.5 * dw, 0.5 * dh
+
+    base_box = None
+    for b in boxes:
+        if is_base_blue_box(b[0], b[1], b[2], b[3], dh):
+            base_box = b
+            break
+    if base_box is None:
+        # Fallback: lowest box in the frame
+        base_box = max(boxes, key=lambda b: b[1] + 0.5 * b[3])
+
+    bp_base = _blue_point_mm(
+        depth_mm,
+        blue_mask,
+        base_box[0],
+        base_box[1],
+        base_box[2],
+        base_box[3],
+        base_box[4],
+        fx=fx,
+        fy=fy,
+        cx=cx_f,
+        cy=cy_f,
+    )
+    if bp_base is None:
+        return None
+    p_base, _ = bp_base
+
+    # Closest / worst alert joint
+    alert = min(alerts, key=lambda a: float(a[4]))
+    ax, ay, aw, ah = int(alert[0]), int(alert[1]), int(alert[2]), int(alert[3])
+    # Prefer matching box depth from the blue list
+    d_alert = None
+    for bx, by, bw, bh, bd in boxes:
+        if abs(bx - ax) < 8 and abs(by - ay) < 8:
+            d_alert = bd
+            break
+    bp_j = _blue_point_mm(
+        depth_mm,
+        blue_mask,
+        ax,
+        ay,
+        aw,
+        ah,
+        d_alert,
+        fx=fx,
+        fy=fy,
+        cx=cx_f,
+        cy=cy_f,
+    )
+    if bp_j is None:
+        return None
+    p_joint, _ = bp_j
+
+    # Vector from joint → base (retreat direction)
+    dx = p_base[0] - p_joint[0]
+    dy = p_base[1] - p_joint[1]
+    dz = p_base[2] - p_joint[2]
+    dist = float(np.sqrt(dx * dx + dy * dy + dz * dz))
+    if dist < 15.0:
+        return (
+            "PROXIMITY RETREAT: joint already near BASE landmark - "
+            "pull arm gently toward pedestal / home"
+        )
+
+    parts: list[str] = []
+    # Image-horizontal (camera X)
+    if abs(dx) >= 30.0:
+        parts.append(
+            ("camera-RIGHT" if dx > 0 else "camera-LEFT")
+            + f" ~{abs(dx) / 10.0:.0f}cm"
+        )
+    # Image-vertical (camera Y; +Y is down)
+    if abs(dy) >= 30.0:
+        parts.append(
+            ("camera-DOWN" if dy > 0 else "camera-UP")
+            + f" ~{abs(dy) / 10.0:.0f}cm"
+        )
+    # Depth (camera Z; +Z away from camera)
+    if abs(dz) >= 30.0:
+        parts.append(
+            ("FARTHER from camera" if dz > 0 else "CLOSER to camera")
+            + f" ~{abs(dz) / 10.0:.0f}cm"
+        )
+    if not parts:
+        parts.append(f"toward BASE (~{dist / 10.0:.0f}cm)")
+
+    return (
+        "PROXIMITY RETREAT -> move arm toward ROBOT BASE (0,0,0): "
+        + ", ".join(parts)
+        + f"  |  remaining ~{dist / 10.0:.0f}cm to base landmark"
+    )
 
 
 def draw_proximity_error(

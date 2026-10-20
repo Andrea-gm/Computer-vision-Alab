@@ -6,6 +6,7 @@
   "h": 138,
   "image_width": 640,
   "image_height": 480,
+  "physical_height_mm": 400,
   "slot_rx": 8,
   "slot_ry": 5,
   "note": "User closed-rack crop re-lock. match=0.669 scale=1.010. Old ROI was (226, 55, 137, 152).",

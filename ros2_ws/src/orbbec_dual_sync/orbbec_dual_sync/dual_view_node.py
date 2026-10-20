@@ -134,6 +134,11 @@ class DualViewNode(Node):
         self.declare_parameter("blue_min_area", 280)
         self.declare_parameter("blue_every_n", 1)
         self.declare_parameter("blue_proximity_mm", 100.0)  # 10 cm red alert
+        # 6-slot JointBank + Kalman coast (HSV detector unchanged).
+        self.declare_parameter("blue_num_joints", 6)
+        self.declare_parameter("blue_coast_s", 10.0)
+        self.declare_parameter("blue_merge_mm", 80.0)
+        self.declare_parameter("blue_match_mm", 120.0)
 
         t0 = str(self.get_parameter("cam0_color_topic").value)
         t1 = str(self.get_parameter("cam1_color_topic").value)
@@ -170,10 +175,27 @@ class DualViewNode(Node):
         self.blue_proximity_mm = max(
             10.0, float(self.get_parameter("blue_proximity_mm").value)
         )
+        self.blue_num_joints = max(
+            1, int(self.get_parameter("blue_num_joints").value)
+        )
+        self.blue_coast_s = max(0.1, float(self.get_parameter("blue_coast_s").value))
+        self.blue_merge_mm = max(
+            10.0, float(self.get_parameter("blue_merge_mm").value)
+        )
+        self.blue_match_mm = max(
+            20.0, float(self.get_parameter("blue_match_mm").value)
+        )
         self._blue_boxes0 = None
         self._blue_boxes1 = None
         self._blue_alert0 = False
         self._blue_alert1 = False
+        self._last_retreat_log0 = 0.0
+        self._last_retreat_log1 = 0.0
+        self._last_fuse_log = 0.0
+        self._fuse0: Optional[dict] = None
+        self._fuse1: Optional[dict] = None
+        self._joint_bank = None
+        self._cell_frames = None
         self._furnace_slots: list[tuple[int, int, int, int, int]] = []
         self._latest_depth0: Optional[np.ndarray] = None
         self._latest_depth1: Optional[np.ndarray] = None
@@ -234,8 +256,42 @@ class DualViewNode(Node):
                 f"Baby-blue color mask ON both panes: min_area={self.blue_min_area} "
                 f"show_mask={self.blue_show_mask}; RED alert if blue < "
                 f"{self.blue_proximity_mm:.0f}mm of black/silver equipment "
-                f"(mask hidden; 3D/depth; base joint ignored)"
+                f"(mask hidden; 3D/depth; base joint ignored); "
+                f"JointBank n={self.blue_num_joints} coast={self.blue_coast_s:.1f}s "
+                f"merge={self.blue_merge_mm:.0f}mm match={self.blue_match_mm:.0f}mm"
             )
+            try:
+                from .cell_frames import default_cell_frames_path, load_cell_frames
+
+                cpath = default_cell_frames_path(self._robotics)
+                self._cell_frames = load_cell_frames(cpath)
+                from .cell_frames import LAYOUT_PERPENDICULAR, apply_perpendicular_layout
+
+                if self._cell_frames.layout == LAYOUT_PERPENDICULAR:
+                    apply_perpendicular_layout(self._cell_frames)
+                self.get_logger().info(
+                    f"ur_base cell_frames: {cpath} "
+                    f"layout={self._cell_frames.layout} "
+                    f"bootstrap={self._cell_frames.bootstrap_from_blue_base} "
+                    f"cam0_ready={self._cell_frames.cam0.ready} "
+                    f"cam1_ready={self._cell_frames.cam1.ready} "
+                    f"(cam0⊥cam1 90deg — pedestal blue = origin)"
+                )
+            except Exception as exc:
+                self._cell_frames = None
+                self.get_logger().warn(f"cell_frames not loaded: {exc}")
+            try:
+                from .blue_joint_tracks import JointBank
+
+                self._joint_bank = JointBank(
+                    num_joints=self.blue_num_joints,
+                    coast_s=self.blue_coast_s,
+                    merge_mm=self.blue_merge_mm,
+                    match_mm=self.blue_match_mm,
+                )
+            except Exception as exc:
+                self._joint_bank = None
+                self.get_logger().warn(f"JointBank init failed: {exc}")
 
         if self.enable_rack_cv:
             try:
@@ -388,7 +444,7 @@ class DualViewNode(Node):
     def _overlay_blue_on(
         self, decorated: np.ndarray, raw: np.ndarray, *, cam: str
     ) -> np.ndarray:
-        """HSV baby-blue boxes labeled with Orbbec depth distance (not confidence)."""
+        """HSV baby-blue → JointBank tracks (J0..J5) with Kalman coast."""
         alert_attr = "_blue_alert0" if cam == "cam0" else "_blue_alert1"
         if not self.enable_blue_cv:
             setattr(self, alert_attr, False)
@@ -413,24 +469,116 @@ class DualViewNode(Node):
         try:
             from .baby_blue_draw import (
                 baby_blue_mask,
-                draw_baby_blue_overlay,
                 draw_proximity_error,
                 proximity_alerts,
+                retreat_guidance_toward_base,
+            )
+            from .blue_joint_tracks import (
+                draw_tracked_blue,
+                views_to_prox_boxes,
             )
 
             boxes = getattr(self, cache_attr) or []
-            out = draw_baby_blue_overlay(
-                decorated,
-                min_area=self.blue_min_area,
-                show_mask=self.blue_show_mask,
-                boxes=boxes,
-                depth_mm=depth,
-            )
-            alerts = []
+            rh, rw = raw.shape[:2]
+            mask = baby_blue_mask(raw)
+            pose = None
+            fx = 520.0
+            if self._cell_frames is not None:
+                pose = self._cell_frames.pose(cam)
+                fx = float(self._cell_frames.fx_px)
+
+            # Scale boxes to depth frame for 3D / bank ingest
+            boxes_for_bank = boxes
+            mask_for_bank = mask
+            depth_for_bank = depth
             if depth is not None and boxes:
-                mask = baby_blue_mask(raw)
+                dh, dw = depth.shape[:2]
+                if (dh, dw) != (rh, rw) and rh > 0 and rw > 0:
+                    sx, sy = dw / float(rw), dh / float(rh)
+                    boxes_for_bank = [
+                        (
+                            int(x * sx),
+                            int(y * sy),
+                            max(1, int(w * sx)),
+                            max(1, int(h * sy)),
+                            d,
+                        )
+                        for x, y, w, h, d in boxes
+                    ]
+                    mask_for_bank = cv2.resize(
+                        mask, (dw, dh), interpolation=cv2.INTER_NEAREST
+                    )
+
+            views = []
+            if self._joint_bank is not None:
+                views = self._joint_bank.ingest_cam(
+                    cam,
+                    boxes_for_bank,
+                    depth_for_bank,
+                    mask_for_bank if depth is not None else mask,
+                    pose=pose,
+                    fx=fx,
+                    frame_h=depth.shape[0] if depth is not None else rh,
+                    frame_w=depth.shape[1] if depth is not None else rw,
+                    bgr=raw,
+                )
+                # Pedestal blue = ur_base (0,0,0) for both cameras.
+                try:
+                    self._bootstrap_origin_from_j0(cam)
+                except Exception:
+                    pass
+                # Scale track views back to color/decorated frame for drawing
+                if depth is not None and boxes:
+                    dh, dw = depth.shape[:2]
+                    if (dh, dw) != (rh, rw) and dh > 0 and dw > 0:
+                        ox, oy = rw / float(dw), rh / float(dh)
+                        for v in views:
+                            v.x = int(v.x * ox)
+                            v.y = int(v.y * oy)
+                            v.w = max(1, int(v.w * ox))
+                            v.h = max(1, int(v.h * oy))
+                live, coast, cap = self._joint_bank.hud_counts()
+            else:
+                live = coast = 0
+                cap = self.blue_num_joints
+                from .blue_joint_tracks import TrackView
+
+                views = [
+                    TrackView(
+                        track_id=i,
+                        x=b[0],
+                        y=b[1],
+                        w=b[2],
+                        h=b[3],
+                        d_mm=b[4],
+                        coasting=False,
+                        is_base=False,
+                        p_base=None,
+                    )
+                    for i, b in enumerate(boxes)
+                ]
+
+            out = draw_tracked_blue(
+                decorated,
+                views,
+                show_mask=self.blue_show_mask,
+                depth_mm=depth
+                if depth is not None and depth.shape[:2] == raw.shape[:2]
+                else None,
+                hud_live=live,
+                hud_coast=coast,
+                hud_cap=cap,
+                tape_box=self._joint_bank._tape_box.get(cam)
+                if self._joint_bank is not None
+                else None,
+            )
+
+            alerts = []
+            guide = None
+            prox_boxes = views_to_prox_boxes(views)
+            if depth is not None and prox_boxes:
                 if mask.shape[:2] != depth.shape[:2]:
-                    mask = cv2.resize(
+                    mask_d = cv2.resize(
                         mask,
                         (depth.shape[1], depth.shape[0]),
                         interpolation=cv2.INTER_NEAREST,
@@ -441,10 +589,9 @@ class DualViewNode(Node):
                         interpolation=cv2.INTER_LINEAR,
                     )
                 else:
+                    mask_d = mask
                     raw_for_prox = raw
-                # Boxes are in color-frame coords; scale to depth if needed
                 dh, dw = depth.shape[:2]
-                rh, rw = raw.shape[:2]
                 if (dh, dw) != (rh, rw) and rh > 0 and rw > 0:
                     sx, sy = dw / float(rw), dh / float(rh)
                     boxes_d = [
@@ -455,19 +602,43 @@ class DualViewNode(Node):
                             max(1, int(h * sy)),
                             d,
                         )
-                        for x, y, w, h, d in boxes
+                        for x, y, w, h, d in prox_boxes
                     ]
                 else:
-                    boxes_d = boxes
-                # Hidden black equipment mask vs blue joints (3D / depth).
+                    boxes_d = prox_boxes
+                rack_for_prox = None
+                if cam == "cam1" and self.classify_xywh:
+                    rcx, rcy, rcw, rch = self.classify_xywh
+                    if (dh, dw) != (rh, rw) and rh > 0 and rw > 0:
+                        rack_for_prox = (
+                            int(rcx * sx),
+                            int(rcy * sy),
+                            max(1, int(rcw * sx)),
+                            max(1, int(rch * sy)),
+                        )
+                    else:
+                        rack_for_prox = (int(rcx), int(rcy), int(rcw), int(rch))
                 alerts = proximity_alerts(
                     depth,
                     boxes_d,
-                    mask,
+                    mask_d,
                     bgr=raw_for_prox,
                     thresh_mm=self.blue_proximity_mm,
                     skip_base=True,
+                    rack_xywh=rack_for_prox,
+                    rack_height_mm=400.0,
                 )
+                if alerts:
+                    try:
+                        guide = retreat_guidance_toward_base(
+                            depth, boxes_d, mask_d, alerts
+                        )
+                    except Exception:
+                        guide = None
+                try:
+                    self._stash_fuse_points(cam, depth, boxes_d, mask_d, alerts)
+                except Exception:
+                    pass
                 if alerts and (dh, dw) != out.shape[:2]:
                     ox, oy = out.shape[1] / float(dw), out.shape[0] / float(dh)
                     alerts = [
@@ -481,11 +652,35 @@ class DualViewNode(Node):
                         )
                         for a in alerts
                     ]
+
+            # Dedup pane alerts: only the tighter-gap cam raises fused flag if
+            # both see the same track; still draw red on the alerting pane.
             setattr(self, alert_attr, bool(alerts))
             if alerts:
                 out = draw_proximity_error(
                     out, alerts, thresh_cm=self.blue_proximity_mm / 10.0
                 )
+                if guide:
+                    log_attr = (
+                        "_last_retreat_log0"
+                        if cam == "cam0"
+                        else "_last_retreat_log1"
+                    )
+                    now = time.monotonic()
+                    if now - float(getattr(self, log_attr, 0.0)) >= 1.0:
+                        setattr(self, log_attr, now)
+                        self.get_logger().error(f"[{cam}] {guide}")
+                        print(f"\n*** [{cam}] {guide} ***\n", flush=True)
+                    cv2.putText(
+                        out,
+                        "RETREAT -> BASE (see terminal)",
+                        (18, out.shape[0] - 18),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        (0, 0, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
             return out
         except Exception as exc:
             self.get_logger().warn(f"blue draw {cam}: {exc}")
@@ -607,6 +802,177 @@ class DualViewNode(Node):
             return f"ok ({recv})"
         return f"no ROS frames {age}s — is publisher up?"
 
+    def _bootstrap_origin_from_j0(self, cam: str) -> None:
+        """Lock cell_frames so the pedestal blue joint is ur_base (0,0,0)."""
+        if self._joint_bank is None or self._cell_frames is None:
+            return
+        if not self._joint_bank.origin_ready or self._joint_bank.j0_p_cam is None:
+            return
+        # Only update the camera that currently owns the pedestal sighting.
+        if self._joint_bank.j0_cam and self._joint_bank.j0_cam != cam:
+            return
+        from .cell_frames import bootstrap_pose_from_base_landmark
+
+        pose = self._cell_frames.pose(cam)
+        new_pose = bootstrap_pose_from_base_landmark(
+            self._joint_bank.j0_p_cam, R=pose.R, frame_id=pose.frame_id
+        )
+        if cam == "cam0":
+            self._cell_frames.cam0 = new_pose
+        else:
+            self._cell_frames.cam1 = new_pose
+
+    def _stash_fuse_points(
+        self,
+        cam: str,
+        depth: Optional[np.ndarray],
+        boxes: list,
+        mask: np.ndarray,
+        alerts: list,
+    ) -> None:
+        """Cache cam-frame 3D base + alerting joint for fused ur_base retreat."""
+        from .baby_blue_draw import (
+            _blue_point_mm,
+            is_base_blue_box,
+        )
+        from .cell_frames import bootstrap_pose_from_base_landmark, cam_to_base
+
+        fuse_attr = "_fuse0" if cam == "cam0" else "_fuse1"
+        if depth is None or not boxes:
+            setattr(self, fuse_attr, None)
+            return
+        dh, dw = depth.shape[:2]
+        fx = 520.0
+        if self._cell_frames is not None:
+            fx = float(self._cell_frames.fx_px)
+        cx_f, cy_f = 0.5 * dw, 0.5 * dh
+        base_box = None
+        for b in boxes:
+            if is_base_blue_box(b[0], b[1], b[2], b[3], dh):
+                base_box = b
+                break
+        if base_box is None:
+            base_box = max(boxes, key=lambda b: b[1] + 0.5 * b[3])
+        bp_base = _blue_point_mm(
+            depth,
+            mask,
+            base_box[0],
+            base_box[1],
+            base_box[2],
+            base_box[3],
+            base_box[4],
+            fx=fx,
+            fy=fx,
+            cx=cx_f,
+            cy=cy_f,
+        )
+        p_joint_cam = None
+        if alerts:
+            alert = min(alerts, key=lambda a: float(a[4]))
+            ax, ay, aw, ah = (
+                int(alert[0]),
+                int(alert[1]),
+                int(alert[2]),
+                int(alert[3]),
+            )
+            d_alert = None
+            for bx, by, bw, bh, bd in boxes:
+                if abs(bx - ax) < 8 and abs(by - ay) < 8:
+                    d_alert = bd
+                    break
+            bp_j = _blue_point_mm(
+                depth,
+                mask,
+                ax,
+                ay,
+                aw,
+                ah,
+                d_alert,
+                fx=fx,
+                fy=fx,
+                cx=cx_f,
+                cy=cy_f,
+            )
+            if bp_j is not None:
+                p_joint_cam = bp_j[0]
+
+        p_base_cam = bp_base[0] if bp_base is not None else None
+        # Bootstrap / refresh T_base_cam from pedestal landmark
+        if (
+            self._cell_frames is not None
+            and self._cell_frames.bootstrap_from_blue_base
+            and p_base_cam is not None
+        ):
+            pose = self._cell_frames.pose(cam)
+            # Keep configured R; set t so pedestal → ur_base origin
+            new_pose = bootstrap_pose_from_base_landmark(
+                p_base_cam, R=pose.R, frame_id=pose.frame_id
+            )
+            if cam == "cam0":
+                self._cell_frames.cam0 = new_pose
+            else:
+                self._cell_frames.cam1 = new_pose
+
+        p_joint_base = None
+        if (
+            p_joint_cam is not None
+            and self._cell_frames is not None
+            and self._cell_frames.pose(cam).ready
+        ):
+            p_joint_base = cam_to_base(p_joint_cam, self._cell_frames.pose(cam))
+
+        setattr(
+            self,
+            fuse_attr,
+            {
+                "alerted": bool(alerts),
+                "p_joint_cam": p_joint_cam,
+                "p_base_cam": p_base_cam,
+                "p_joint_base": p_joint_base,
+                "gap_mm": float(min(a[4] for a in alerts)) if alerts else None,
+            },
+        )
+
+    def _fuse_base_retreat(self) -> None:
+        """One terminal instruction in ur_base when either cam proximity-alerts."""
+        from .cell_frames import format_base_retreat, save_cell_frames
+
+        if not (self._blue_alert0 or self._blue_alert1):
+            return
+        now = time.monotonic()
+        if now - float(self._last_fuse_log) < 1.0:
+            return
+        self._last_fuse_log = now
+
+        # Prefer the camera with the tighter gap
+        candidates = []
+        for cam, fuse in (("cam0", self._fuse0), ("cam1", self._fuse1)):
+            if not fuse or not fuse.get("alerted"):
+                continue
+            pjb = fuse.get("p_joint_base")
+            if pjb is None:
+                continue
+            candidates.append((fuse.get("gap_mm") or 1e9, cam, pjb))
+        if not candidates:
+            return
+        candidates.sort(key=lambda x: x[0])
+        _gap, cam, p_joint_base = candidates[0]
+        msg = format_base_retreat(p_joint_base)
+        src = []
+        if self._blue_alert0:
+            src.append("cam0")
+        if self._blue_alert1:
+            src.append("cam1")
+        full = f"[{'+'.join(src)} via {cam}] {msg}"
+        self.get_logger().error(full)
+        print(f"\n*** {full} ***\n", flush=True)
+        # Persist bootstrapped poses occasionally
+        if self._cell_frames is not None:
+            try:
+                save_cell_frames(self._cell_frames)
+            except Exception:
+                pass
+
     def _on_timer(self) -> None:
         if self._should_exit:
             return
@@ -647,6 +1013,20 @@ class DualViewNode(Node):
                     4,
                     cv2.LINE_AA,
                 )
+                cv2.putText(
+                    frame,
+                    "FUSED RETREAT -> ur_base (0,0,0)  see terminal",
+                    (24, max(80, h // 2 + 40)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                try:
+                    self._fuse_base_retreat()
+                except Exception as exc:
+                    self.get_logger().warn(f"ur_base fuse failed: {exc}")
             ok = self._preview.show(frame)
             if not ok and self._preview.user_closed:
                 self.get_logger().info("Preview closed — exiting dual view.")
