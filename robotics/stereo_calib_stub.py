@@ -129,6 +129,11 @@ Manual OpenCV write (if you calibrate elsewhere):
 
 Until calibrate succeeds, --3d-reproject-assist refuses placeholder R,t.
 Edge assist stays on by default; classic --dual sticky soft peer is NOT required.
+
+Preferred when you cannot place a board (arm in the way):
+  python scene_extrinsics_calib.py howto
+  python scene_extrinsics_calib.py solve --live
+  Uses shared-scene ORB+depth + purple-tape origin/axis (no ArUco).
 """.strip()
     )
     return 0

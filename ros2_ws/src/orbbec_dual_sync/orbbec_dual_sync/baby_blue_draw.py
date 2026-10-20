@@ -116,6 +116,45 @@ def find_purple_tape(
     return best
 
 
+def purple_tape_long_axis(
+    bgr: np.ndarray,
+    box: tuple[int, int, int, int],
+) -> Optional[tuple[tuple[float, float], tuple[float, float], float]]:
+    """Centroid UV, unit long-axis UV, and length_px for a purple-tape box.
+
+    Used by scene extrinsics yaw lock. Returns None if the blob is too small.
+    """
+    x, y, w, h = [int(v) for v in box]
+    if w < 3 or h < 2:
+        return None
+    mask = purple_tape_mask(bgr)
+    roi = mask[y : y + h, x : x + w]
+    cnts, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        cx, cy = x + 0.5 * w, y + 0.5 * h
+        axis = (1.0, 0.0) if w >= h else (0.0, 1.0)
+        return (cx, cy), axis, float(max(w, h))
+    c = max(cnts, key=cv2.contourArea)
+    c = c + np.array([[[x, y]]], dtype=c.dtype)
+    rect = cv2.minAreaRect(c)
+    (rw, rh) = rect[1]
+    angle = float(rect[2])
+    if rw < rh:
+        length_px = float(rh)
+        ang_rad = np.deg2rad(angle + 90.0)
+    else:
+        length_px = float(rw)
+        ang_rad = np.deg2rad(angle)
+    axis = (float(np.cos(ang_rad)), float(np.sin(ang_rad)))
+    m = cv2.moments(c)
+    if abs(m["m00"]) < 1e-6:
+        cx, cy = x + 0.5 * w, y + 0.5 * h
+    else:
+        cx = float(m["m10"] / m["m00"])
+        cy = float(m["m01"] / m["m00"])
+    return (cx, cy), axis, max(1.0, length_px)
+
+
 def median_depth_mm(
     depth_mm: Optional[np.ndarray],
     x: int,
