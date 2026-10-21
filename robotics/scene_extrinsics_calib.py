@@ -86,21 +86,23 @@ def cmd_howto(_: argparse.Namespace) -> int:
 Dual-camera extrinsics — three paths (same output files)
 
 ---------------------------------------------------------------------------
-PATH 1 — Asymmetric CHECKERBOARD / circle grid (printed board)
+PATH 1 — Asymmetric CHECKERBOARD (primary rigid calib target)
 ---------------------------------------------------------------------------
-Best when you can hold a board in the overlap (park the arm).
+What it is: a flat, rigid printed board with an UNEVEN number of rows and
+columns of inner corners (e.g. 7x8, 9x6, 9x10 — never NxN). That design is
+standard in robotics / machine vision so OpenCV/ROS can always recover the
+board's exact up/down and left/right (no 180 deg flip ambiguity).
+
+Best when you can hold the board in the dual-camera overlap (park the arm).
 
   # Capture synced pairs (board visible in BOTH cams)
   python stereo_calib_stub.py capture
 
-  # Asymmetric checkerboard (unequal corners, e.g. 9x6) — recommended
+  # Match --cols/--rows/--square-mm to YOUR board (inner corners + square mm)
   python scene_extrinsics_calib.py board --asymmetric-chess --cols 9 --rows 6 --square-mm 25
 
-  # OR asymmetric circle grid (staggered dots)
+  # Related: asymmetric circle grid (staggered dots) if that is your print
   python scene_extrinsics_calib.py board --asymmetric-circles --cols 4 --rows 11 --square-mm 20
-
-Why asymmetric? A square board (8x8) can flip 180 degrees and look identical.
-Unequal size (9x6) or staggered circles give a unique orientation so R is stable.
 
 ---------------------------------------------------------------------------
 PATH 2 — Scene + purple tape (NO board)

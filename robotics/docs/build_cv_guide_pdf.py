@@ -330,24 +330,30 @@ def build() -> Path:
         "You have three supported ways to learn where cam1 sits relative to cam0. "
         "All write the same files: stereo_extrinsics.json and cell_frames.json."
     )
-    pdf.h2("Path A — Asymmetric checkerboard (what you are trying now)")
+    pdf.h2("Path A — Asymmetric checkerboard (primary rigid target)")
     pdf.body(
-        "Yes — an asymmetric checkerboard is a first-class option. "
-        "\"Asymmetric\" here means the board is NOT square in corner count "
-        "(for example 9x6 inner corners, not 8x8). That breaks the 180-degree "
-        "ambiguity of a square board, so OpenCV can lock orientation reliably."
+        "Asymmetric checkerboards are the usual primary rigid calibration targets "
+        "in robotics, computer vision, and machine vision. They are engineered with "
+        "an uneven number of rows and columns of INNER CORNERS (examples: 7x8, 9x6, "
+        "9x10 — never a square NxN grid). That removes orientation ambiguity: "
+        "software (OpenCV, ROS) can always tell which way is up/down and left/right, "
+        "so the recovered board pose — and therefore camera-to-camera R,t — stays "
+        "consistent across frames."
     )
+    pdf.bullet("Use a flat, rigid print (foam board / acrylic backing beats floppy paper).")
+    pdf.bullet("Count INNER CORNERS (where black/white squares meet), not outer squares.")
     pdf.bullet("Hold the board so BOTH Orbbecs see it (park the arm if needed).")
-    pdf.bullet("Measure one square in millimeters with a ruler.")
-    pdf.bullet("Capture many dual pairs, then calibrate.")
+    pdf.bullet("Measure one square edge in millimeters; pass it as --square-mm.")
+    pdf.bullet("Capture many dual pairs at different tilts/distances, then calibrate.")
     pdf.code(
         "python stereo_calib_stub.py capture\n"
         "python scene_extrinsics_calib.py board --asymmetric-chess --cols 9 --rows 6 --square-mm 25\n"
         "python scene_extrinsics_calib.py status"
     )
     pdf.body(
-        "There is also an asymmetric CIRCLE grid (staggered dots) if that is the "
-        "pattern you printed: --asymmetric-circles --cols 4 --rows 11 --square-mm 20."
+        "If your print is an asymmetric CIRCLE grid (staggered dots) instead of "
+        "squares: --asymmetric-circles --cols 4 --rows 11 --square-mm 20. Same idea "
+        "— uneven / staggered pattern for unique orientation."
     )
     pdf.h2("Path B — Scene + purple-tape (no board)")
     pdf.body(

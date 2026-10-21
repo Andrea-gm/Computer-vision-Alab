@@ -30,7 +30,8 @@ from vial_3d_model import EXTRINSICS_PATH, is_extrinsics_placeholder
 ROOT = Path(__file__).resolve().parent
 CALIB_DIR = ROOT / "stereo_calib_pairs"
 DEFAULT_SQUARE_MM = 25.0
-# Asymmetric checkerboard: unequal inner corners (cols != rows) so orientation is unique.
+# Asymmetric checkerboard = primary rigid calib target: UNEQUAL inner corners
+# (e.g. 9x6, 7x8, 9x10) so up/down and left/right are unambiguous in OpenCV/ROS.
 DEFAULT_CHESS_COLS = 9
 DEFAULT_CHESS_ROWS = 6
 # Asymmetric circle grid (OpenCV): (circles per row, number of rows). Common 4x11.
@@ -120,9 +121,10 @@ What you need:
   - Measure square / circle spacing in millimeters with a ruler
 
 Board choices (pick one):
-  A) Asymmetric CHECKERBOARD (recommended if you have one)
-       Unequal inner corners, e.g. {DEFAULT_CHESS_COLS}x{DEFAULT_CHESS_ROWS}
-       (not square like 8x8). Orientation is unambiguous.
+  A) Asymmetric CHECKERBOARD — primary rigid target (recommended)
+       Strictly uneven rows x columns of INNER CORNERS, e.g. 9x6, 7x8, 9x10
+       (never square like 8x8). That kills 180 deg flip ambiguity so OpenCV/ROS
+       always know the board's up/down and left/right.
        calibrate --asymmetric-chess --cols {DEFAULT_CHESS_COLS} --rows {DEFAULT_CHESS_ROWS} --square-mm {DEFAULT_SQUARE_MM}
 
   B) Asymmetric CIRCLE GRID (OpenCV pattern)
