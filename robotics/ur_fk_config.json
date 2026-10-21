@@ -1,0 +1,40 @@
+{
+  "model": "ur5e",
+  "host": "",
+  "joints_path": "ur_joints.json",
+  "R_ur_to_vision": [
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "t_ur_to_vision_mm": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "rack_keepout_min_mm": [
+    200.0,
+    -400.0,
+    0.0
+  ],
+  "rack_keepout_max_mm": [
+    700.0,
+    400.0,
+    500.0
+  ],
+  "confirm_gate_mm": 80.0,
+  "proximity_mm": 100.0,
+  "notes": "Write q_rad into ur_joints.json from teach pendant / script, or set host to robot IP for RTDE when ur_rtde is installed."
+}

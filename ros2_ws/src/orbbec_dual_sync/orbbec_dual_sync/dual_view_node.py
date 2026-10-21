@@ -139,6 +139,11 @@ class DualViewNode(Node):
         self.declare_parameter("blue_coast_s", 10.0)
         self.declare_parameter("blue_merge_mm", 80.0)
         self.declare_parameter("blue_match_mm", 120.0)
+        # Teach-pendant / UR FK stick figure + vision confirm + FK rack keep-out.
+        self.declare_parameter("enable_ur_fk", True)
+        self.declare_parameter("ur_fk_draw", True)
+        self.declare_parameter("ur_fk_confirm", True)
+        self.declare_parameter("ur_fk_rack_alert", True)
 
         t0 = str(self.get_parameter("cam0_color_topic").value)
         t1 = str(self.get_parameter("cam1_color_topic").value)
@@ -185,6 +190,13 @@ class DualViewNode(Node):
         self.blue_match_mm = max(
             20.0, float(self.get_parameter("blue_match_mm").value)
         )
+        self.enable_ur_fk = bool(self.get_parameter("enable_ur_fk").value)
+        self.ur_fk_draw = bool(self.get_parameter("ur_fk_draw").value)
+        self.ur_fk_confirm = bool(self.get_parameter("ur_fk_confirm").value)
+        self.ur_fk_rack_alert = bool(self.get_parameter("ur_fk_rack_alert").value)
+        self._ur_state = None
+        self._ur_state_t = 0.0
+        self._last_fk_alert_log = 0.0
         self._blue_boxes0 = None
         self._blue_boxes1 = None
         self._blue_alert0 = False
@@ -219,7 +231,11 @@ class DualViewNode(Node):
         self.holes: list = []
 
         need_robotics = (
-            self.enable_rack_cv or self.enable_furnace_cv or self.enable_arm_cv
+            self.enable_rack_cv
+            or self.enable_furnace_cv
+            or self.enable_arm_cv
+            or self.enable_blue_cv
+            or self.enable_ur_fk
         )
         if need_robotics:
             try:
@@ -292,6 +308,14 @@ class DualViewNode(Node):
             except Exception as exc:
                 self._joint_bank = None
                 self.get_logger().warn(f"JointBank init failed: {exc}")
+
+        if self.enable_ur_fk:
+            self.get_logger().info(
+                "UR FK stick-figure ON: write robotics/ur_joints.json from teach "
+                "pendant (q_rad[6]) or set ur_fk_config.json host for RTDE; "
+                f"draw={self.ur_fk_draw} confirm={self.ur_fk_confirm} "
+                f"rack_alert={self.ur_fk_rack_alert}"
+            )
 
         if self.enable_rack_cv:
             try:
@@ -653,6 +677,19 @@ class DualViewNode(Node):
                         for a in alerts
                     ]
 
+            # Teach-pendant / UR FK stick figure + confirm + out-of-view rack alert.
+            if self.enable_ur_fk and pose is not None:
+                try:
+                    out, fk_alerts, fk_guide = self._overlay_ur_fk(
+                        out, views, pose=pose, fx=fx, cam=cam
+                    )
+                    if fk_alerts:
+                        alerts = list(alerts) + list(fk_alerts)
+                        if fk_guide and not guide:
+                            guide = fk_guide
+                except Exception as exc:
+                    self.get_logger().warn(f"ur_fk {cam}: {exc}")
+
             # Dedup pane alerts: only the tighter-gap cam raises fused flag if
             # both see the same track; still draw red on the alerting pane.
             setattr(self, alert_attr, bool(alerts))
@@ -686,6 +723,68 @@ class DualViewNode(Node):
             self.get_logger().warn(f"blue draw {cam}: {exc}")
             setattr(self, alert_attr, False)
             return decorated
+
+    def _refresh_ur_state(self):
+        now = time.monotonic()
+        if self._ur_state is not None and (now - self._ur_state_t) < 0.05:
+            return self._ur_state
+        from .ur_skeleton_draw import load_ur_state
+
+        self._ur_state = load_ur_state(self._robotics)
+        self._ur_state_t = now
+        return self._ur_state
+
+    def _overlay_ur_fk(
+        self,
+        out: np.ndarray,
+        views: list,
+        *,
+        pose,
+        fx: float,
+        cam: str,
+    ):
+        """Draw FK skeleton, confirm vs vision, return extra rack alerts."""
+        from .ur_skeleton_draw import (
+            confirm_vision_vs_fk,
+            draw_ur_skeleton,
+            fk_alerts_as_proximity,
+        )
+
+        state = self._refresh_ur_state()
+        if not state:
+            return out, [], None
+        cfg = state["cfg"]
+        pts = state["pts_vision_mm"]
+        matches = []
+        if self.ur_fk_confirm:
+            matches = confirm_vision_vs_fk(
+                views, pts, gate_mm=float(cfg.confirm_gate_mm)
+            )
+        rack_hits = state["rack_hits"] if self.ur_fk_rack_alert else []
+        if self.ur_fk_draw:
+            out = draw_ur_skeleton(
+                out,
+                pts,
+                pose,
+                fx=fx,
+                matches=matches,
+                rack_hits=rack_hits,
+                source=state["source"],
+                model=state["model"],
+            )
+        fk_alerts = fk_alerts_as_proximity(rack_hits) if rack_hits else []
+        guide = None
+        if rack_hits:
+            worst = min(rack_hits, key=lambda x: x[1])
+            guide = (
+                f"FK RACK KEEP-OUT: joint FK{worst[0]} gap={worst[1]:.0f}mm "
+                f"(teach-pad / UR angles — works even if blue joint left FOV)"
+            )
+            now = time.monotonic()
+            if now - float(self._last_fk_alert_log) >= 1.0:
+                self._last_fk_alert_log = now
+                self.get_logger().error(f"[{cam}] {guide}")
+        return out, fk_alerts, guide
 
     def _overlay_arm_on(
         self, decorated: np.ndarray, raw: np.ndarray, *, cam: str
