@@ -31,6 +31,32 @@ from scene_extrinsics import (
 from vial_3d_model import Intrinsics, default_intrinsics
 
 
+class TestAsymmetricBoard(unittest.TestCase):
+    def test_asymmetric_circle_object_points_stagger(self):
+        from stereo_calib_stub import _asymmetric_circle_object_points
+
+        obj = _asymmetric_circle_object_points(4, 3, 20.0)
+        self.assertEqual(obj.shape, (12, 3))
+        # Row 0: x = 0,40,80,120 ; Row 1 staggered by one spacing
+        self.assertAlmostEqual(float(obj[0, 0]), 0.0)
+        self.assertAlmostEqual(float(obj[1, 0]), 40.0)
+        self.assertAlmostEqual(float(obj[4, 0]), 20.0)  # first of odd row
+        self.assertAlmostEqual(float(obj[4, 1]), 20.0)
+
+    def test_board_mode_defaults_asymmetric_chess_when_unequal(self):
+        from stereo_calib_stub import _board_mode
+        import argparse
+
+        ns = argparse.Namespace(
+            cols=9,
+            rows=6,
+            charuco=False,
+            asymmetric_circles=False,
+            asymmetric_chess=False,
+        )
+        self.assertEqual(_board_mode(ns), "asymmetric_chess")
+
+
 class TestUmeyama(unittest.TestCase):
     def test_recovers_known_rigid(self):
         rng = np.random.default_rng(42)

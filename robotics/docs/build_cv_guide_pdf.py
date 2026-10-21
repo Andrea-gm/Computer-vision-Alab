@@ -325,11 +325,49 @@ def build() -> Path:
 
     # ----- Page 6 -----
     pdf.add_page()
-    pdf.h1("5. Scene + purple-tape extrinsics (current recommended path)")
+    pdf.h1("5. Getting R,t — board vs scene (including asymmetric checkerboard)")
     pdf.body(
-        "This is the ArUco-free path added in PR #1 (feat/scene-tape-extrinsics). "
-        "It answers: \"Given what both cameras already see from different angles, "
-        "where is cam1 relative to cam0?\""
+        "You have three supported ways to learn where cam1 sits relative to cam0. "
+        "All write the same files: stereo_extrinsics.json and cell_frames.json."
+    )
+    pdf.h2("Path A — Asymmetric checkerboard (what you are trying now)")
+    pdf.body(
+        "Yes — an asymmetric checkerboard is a first-class option. "
+        "\"Asymmetric\" here means the board is NOT square in corner count "
+        "(for example 9x6 inner corners, not 8x8). That breaks the 180-degree "
+        "ambiguity of a square board, so OpenCV can lock orientation reliably."
+    )
+    pdf.bullet("Hold the board so BOTH Orbbecs see it (park the arm if needed).")
+    pdf.bullet("Measure one square in millimeters with a ruler.")
+    pdf.bullet("Capture many dual pairs, then calibrate.")
+    pdf.code(
+        "python stereo_calib_stub.py capture\n"
+        "python scene_extrinsics_calib.py board --asymmetric-chess --cols 9 --rows 6 --square-mm 25\n"
+        "python scene_extrinsics_calib.py status"
+    )
+    pdf.body(
+        "There is also an asymmetric CIRCLE grid (staggered dots) if that is the "
+        "pattern you printed: --asymmetric-circles --cols 4 --rows 11 --square-mm 20."
+    )
+    pdf.h2("Path B — Scene + purple-tape (no board)")
+    pdf.body(
+        "When the arm blocks a board, match the shared scene with ORB + depth and "
+        "use purple tape as origin + long-axis yaw lock."
+    )
+    pdf.code("python scene_extrinsics_calib.py solve --live")
+    pdf.h2("Path C — ChArUco (optional classic)")
+    pdf.body("Printed ChArUco still works via stereo_calib_stub.py calibrate --charuco.")
+    pdf.callout(
+        "Which should you use today?",
+        "If you can place an asymmetric checkerboard in the dual overlap for a few "
+        "minutes: use Path A (board). If the arm permanently fills that space: use "
+        "Path B (scene+tape). Purple tape still helps Path B for origin/yaw; the "
+        "board replaces tape for the heavy R,t solve when available.",
+    )
+    pdf.h2("Scene + tape algorithm (Path B detail)")
+    pdf.body(
+        "This ArUco-free path answers: given what both cameras already see from "
+        "different angles, where is cam1 relative to cam0?"
     )
     pdf.h2("Algorithm (plain language)")
     pdf.bullet("1. Grab synced RGB + depth from both cameras.")

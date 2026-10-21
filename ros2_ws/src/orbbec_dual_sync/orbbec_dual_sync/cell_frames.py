@@ -28,6 +28,7 @@ PERPENDICULAR_R_CAM1 = np.array(
 )
 LAYOUT_PERPENDICULAR = "perpendicular_90"
 LAYOUT_SCENE_TAPE = "scene_tape"
+LAYOUT_ASYMMETRIC_BOARD = "asymmetric_board"
 
 
 @dataclass
@@ -127,6 +128,7 @@ def save_cell_frames(cf: CellFrames) -> None:
             "layout=perpendicular_90: cam0 R=I, cam1 R=yaw+90 about Y. "
             "layout=scene_tape: R,t from shared-scene ORB + purple-tape Umeyama "
             "(see robotics/scene_extrinsics_calib.py). "
+            "layout=asymmetric_board: R,t from asymmetric checkerboard/circle stereoCalibrate. "
             "bootstrap updates t so each camera maps the pedestal/tape to the origin."
         ),
         "bootstrap_from_blue_base": bool(cf.bootstrap_from_blue_base),

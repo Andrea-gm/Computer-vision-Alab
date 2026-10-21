@@ -83,28 +83,42 @@ def _load_depth(path: Path) -> np.ndarray:
 def cmd_howto(_: argparse.Namespace) -> int:
     print(
         """
-Scene + purple-tape extrinsics (NO ArUco board required)
+Dual-camera extrinsics — three paths (same output files)
 
-What it uses:
-  - Shared static scene both Orbbecs already see (rack, pedestal, fixtures)
-  - ORB feature matches + Orbbec depth → 3D point pairs
-  - Umeyama + RANSAC → R,t  (X_cam1 = R @ X_cam0 + t)
-  - Purple tape: centroid = shared origin; long axis locks yaw
-  - Blue arm HSV is masked out of ORB so moving links do not poison the solve
+---------------------------------------------------------------------------
+PATH 1 — Asymmetric CHECKERBOARD / circle grid (printed board)
+---------------------------------------------------------------------------
+Best when you can hold a board in the overlap (park the arm).
 
-Setup:
-  1. Park or slow the arm; leave purple tape visible to BOTH cameras.
-  2. Each Orbbec on its own USB 3 port.
-  3. python scene_extrinsics_calib.py solve --live
-       SPACE = grab a dual frame and accumulate
-       S     = solve from accumulated frames + write JSON
-       Q     = quit without writing
-  4. Or solve from saved files:
-       python scene_extrinsics_calib.py solve --color0 ... --depth0 ... --color1 ... --depth1 ...
+  # Capture synced pairs (board visible in BOTH cams)
+  python stereo_calib_stub.py capture
 
-Writes:
-  - robotics/stereo_extrinsics.json   (cam0→cam1, clears PLACEHOLDER)
-  - robotics/cell_frames.json         (layout=scene_tape, ur_base at tape)
+  # Asymmetric checkerboard (unequal corners, e.g. 9x6) — recommended
+  python scene_extrinsics_calib.py board --asymmetric-chess --cols 9 --rows 6 --square-mm 25
+
+  # OR asymmetric circle grid (staggered dots)
+  python scene_extrinsics_calib.py board --asymmetric-circles --cols 4 --rows 11 --square-mm 20
+
+Why asymmetric? A square board (8x8) can flip 180 degrees and look identical.
+Unequal size (9x6) or staggered circles give a unique orientation so R is stable.
+
+---------------------------------------------------------------------------
+PATH 2 — Scene + purple tape (NO board)
+---------------------------------------------------------------------------
+Best when the arm blocks a board. Uses shared scene ORB+depth + tape origin/axis.
+
+  python scene_extrinsics_calib.py solve --live
+       SPACE = buffer dual RGB-D   S = solve+write   Q = quit
+
+---------------------------------------------------------------------------
+PATH 3 — Classic ChArUco (optional)
+---------------------------------------------------------------------------
+  python stereo_calib_stub.py capture
+  python stereo_calib_stub.py calibrate --charuco
+
+Writes (all paths):
+  - robotics/stereo_extrinsics.json
+  - robotics/cell_frames.json   (layout=asymmetric_board or scene_tape)
 
 Validate:
   python scene_extrinsics_calib.py status
@@ -392,9 +406,36 @@ def _solve_live(args: argparse.Namespace) -> int:
         cv2.destroyAllWindows()
 
 
+def cmd_board(args: argparse.Namespace) -> int:
+    """Run asymmetric (or classic) board stereoCalibrate via stereo_calib_stub."""
+    import stereo_calib_stub as stub
+
+    # Build a Namespace compatible with stereo_calib_stub.cmd_calibrate
+    cal = argparse.Namespace(
+        cols=int(args.cols),
+        rows=int(args.rows),
+        square_mm=float(args.square_mm),
+        asymmetric_chess=bool(args.asymmetric_chess),
+        asymmetric_circles=bool(args.asymmetric_circles),
+        charuco=bool(args.charuco),
+        squares_x=int(args.squares_x),
+        squares_y=int(args.squares_y),
+        marker_mm=float(args.marker_mm),
+    )
+    if not (cal.asymmetric_chess or cal.asymmetric_circles or cal.charuco):
+        # Default this entrypoint to asymmetric checkerboard.
+        cal.asymmetric_chess = True
+        print("Defaulting to --asymmetric-chess (unequal checkerboard).")
+    print(
+        "Tip: capture pairs first with: python stereo_calib_stub.py capture\n"
+        "Then this command runs calibrate + updates cell_frames."
+    )
+    return int(stub.cmd_calibrate(cal))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Scene + purple-tape dual extrinsics (no ArUco)"
+        description="Dual extrinsics: scene+tape OR asymmetric board"
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -403,6 +444,35 @@ def main() -> int:
 
     p_s = sub.add_parser("status", help="Show stereo_extrinsics + cell_frames status")
     p_s.set_defaults(func=cmd_status)
+
+    p_b = sub.add_parser(
+        "board",
+        help="Calibrate from asymmetric checkerboard / circle grid / ChArUco pairs",
+    )
+    p_b.add_argument("--cols", type=int, default=9, help="Inner corners X or circles/row")
+    p_b.add_argument("--rows", type=int, default=6, help="Inner corners Y or circle rows")
+    p_b.add_argument(
+        "--square-mm",
+        type=float,
+        default=25.0,
+        help="Square size or circle spacing (mm) — measure your board",
+    )
+    bg = p_b.add_mutually_exclusive_group()
+    bg.add_argument(
+        "--asymmetric-chess",
+        action="store_true",
+        help="Asymmetric checkerboard (default if no board flag)",
+    )
+    bg.add_argument(
+        "--asymmetric-circles",
+        action="store_true",
+        help="Asymmetric circle grid (OpenCV staggered dots)",
+    )
+    bg.add_argument("--charuco", action="store_true", help="ChArUco board")
+    p_b.add_argument("--squares-x", type=int, default=5)
+    p_b.add_argument("--squares-y", type=int, default=7)
+    p_b.add_argument("--marker-mm", type=float, default=22.0)
+    p_b.set_defaults(func=cmd_board)
 
     p_sol = sub.add_parser("solve", help="Solve R,t from live dual or image files")
     p_sol.add_argument("--live", action="store_true", help="Open both Orbbecs")

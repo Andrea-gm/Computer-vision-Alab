@@ -1,13 +1,18 @@
-"""Stereo extrinsics status + ChArUco/chessboard capture + calibrate.
+"""Stereo extrinsics status + board capture + calibrate.
 
-``stereo_extrinsics.json`` must map cam0 → cam1 with real R (3×3) and t_mm (3,)
+Supports:
+  - Asymmetric checkerboard (unequal inner corners, e.g. 9x6) — recommended board
+  - Asymmetric circle grid (OpenCV CALIB_CB_ASYMMETRIC_GRID)
+  - Symmetric chessboard / ChArUco (legacy)
+
+``stereo_extrinsics.json`` must map cam0 -> cam1 with real R (3x3) and t_mm (3,)
 before dual-cam 3D reproject / ``--3d-reproject-assist`` is trustworthy.
 
-    cd E:\\Desktop\\Jessica\\Camera
     python stereo_calib_stub.py status
     python stereo_calib_stub.py howto
-    python stereo_calib_stub.py capture          # Space=save pair, Q=quit
-    python stereo_calib_stub.py calibrate        # after >=8 good pairs
+    python stereo_calib_stub.py capture
+    python stereo_calib_stub.py calibrate --asymmetric-chess --cols 9 --rows 6 --square-mm 25
+    python stereo_calib_stub.py calibrate --asymmetric-circles --cols 4 --rows 11 --square-mm 20
 """
 
 from __future__ import annotations
@@ -25,9 +30,13 @@ from vial_3d_model import EXTRINSICS_PATH, is_extrinsics_placeholder
 ROOT = Path(__file__).resolve().parent
 CALIB_DIR = ROOT / "stereo_calib_pairs"
 DEFAULT_SQUARE_MM = 25.0
-# Classic chessboard inner corners (columns x rows). Change to match your board.
+# Asymmetric checkerboard: unequal inner corners (cols != rows) so orientation is unique.
 DEFAULT_CHESS_COLS = 9
 DEFAULT_CHESS_ROWS = 6
+# Asymmetric circle grid (OpenCV): (circles per row, number of rows). Common 4x11.
+DEFAULT_ASYM_CIRCLE_COLS = 4
+DEFAULT_ASYM_CIRCLE_ROWS = 11
+DEFAULT_ASYM_CIRCLE_SPACING_MM = 20.0
 # ChArUco: OpenCV DICT_4X4_50 board, 5x7 squares (common print). Override via flags.
 DEFAULT_CHARUCO_SQUARES_X = 5
 DEFAULT_CHARUCO_SQUARES_Y = 7
@@ -102,38 +111,41 @@ def cmd_status(_: argparse.Namespace) -> int:
 def cmd_howto(_: argparse.Namespace) -> int:
     print(
         f"""
-ChArUco / chessboard stereo calib (hands-on)
+Board stereo calib (hands-on) — asymmetric checkerboard is a first-class option
 
-What you need in the room:
+What you need:
   - Both Orbbecs mounted rigidly (do not move after calib)
-  - A printed ChArUco or chessboard large enough in both FOVs
+  - A board BOTH cameras can see (park the arm if it blocks overlap)
   - Each camera on its own USB 3 port
+  - Measure square / circle spacing in millimeters with a ruler
 
-Fast path (this repo):
+Board choices (pick one):
+  A) Asymmetric CHECKERBOARD (recommended if you have one)
+       Unequal inner corners, e.g. {DEFAULT_CHESS_COLS}x{DEFAULT_CHESS_ROWS}
+       (not square like 8x8). Orientation is unambiguous.
+       calibrate --asymmetric-chess --cols {DEFAULT_CHESS_COLS} --rows {DEFAULT_CHESS_ROWS} --square-mm {DEFAULT_SQUARE_MM}
+
+  B) Asymmetric CIRCLE GRID (OpenCV pattern)
+       Staggered dots, common {DEFAULT_ASYM_CIRCLE_COLS}x{DEFAULT_ASYM_CIRCLE_ROWS}
+       calibrate --asymmetric-circles --cols {DEFAULT_ASYM_CIRCLE_COLS} --rows {DEFAULT_ASYM_CIRCLE_ROWS} --square-mm {DEFAULT_ASYM_CIRCLE_SPACING_MM}
+
+  C) ChArUco / classic chessboard
+       calibrate --charuco ...   or   calibrate --cols C --rows R (no asymmetric flag)
+
+Fast path:
   1. python stereo_calib_stub.py capture
-       Windows show cam0 | cam1. Hold the board so BOTH see it.
-       SPACE = save a synchronized pair   Q = quit
-       Aim for >=12 poses (tilt/distance/volume coverage).
-  2. python stereo_calib_stub.py calibrate
-       Default: chessboard {DEFAULT_CHESS_COLS}x{DEFAULT_CHESS_ROWS} inner corners,
-       square={DEFAULT_SQUARE_MM} mm. Override with --cols/--rows/--square-mm
-       or use --charuco for a ChArUco board.
-  3. python stereo_calib_stub.py status
-       Expect STATUS without PLACEHOLDER.
-  4. Live both-agreement mode (independent dual + geometric assist):
-       python depthcamera.py --dual-independent --3d-reproject-assist
+       SPACE = save pair when BOTH see the board   Q = quit
+       Aim for >=10–12 varied poses (tilt/distance/volume).
+  2. python stereo_calib_stub.py calibrate --asymmetric-chess --cols 9 --rows 6 --square-mm 25
+  3. python stereo_calib_stub.py status   # must NOT say PLACEHOLDER
+  4. Optional cell-frame sync (also writes layout):
+       python scene_extrinsics_calib.py board --asymmetric-chess --cols 9 --rows 6 --square-mm 25
 
-Manual OpenCV write (if you calibrate elsewhere):
-  Write stereo_extrinsics.json with from_camera=0, to_camera=1, R 3x3, t_mm,
-  K0/K1 [fx,fy,cx,cy], notes without the word PLACEHOLDER.
+When the arm blocks a board:
+  python scene_extrinsics_calib.py solve --live
+  (shared-scene ORB+depth + purple tape; no printed board)
 
 Until calibrate succeeds, --3d-reproject-assist refuses placeholder R,t.
-Edge assist stays on by default; classic --dual sticky soft peer is NOT required.
-
-Preferred when you cannot place a board (arm in the way):
-  python scene_extrinsics_calib.py howto
-  python scene_extrinsics_calib.py solve --live
-  Uses shared-scene ORB+depth + purple-tape origin/axis (no ArUco).
 """.strip()
     )
     return 0
@@ -249,14 +261,50 @@ def _chessboard_object_points(cols: int, rows: int, square_mm: float) -> np.ndar
     return obj
 
 
+def _asymmetric_circle_object_points(
+    cols: int, rows: int, spacing_mm: float
+) -> np.ndarray:
+    """World points for OpenCV CALIB_CB_ASYMMETRIC_GRID (staggered rows)."""
+    obj = np.zeros((rows * cols, 3), np.float32)
+    spacing = float(spacing_mm)
+    n = 0
+    for r in range(rows):
+        for c in range(cols):
+            obj[n, 0] = (2 * c + (r % 2)) * spacing
+            obj[n, 1] = r * spacing
+            n += 1
+    return obj
+
+
 def _detect_chessboard(gray, cols: int, rows: int):
+    pattern = (int(cols), int(rows))
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
-    ok, corners = cv2.findChessboardCorners(gray, (cols, rows), flags)
+    ok, corners = cv2.findChessboardCorners(gray, pattern, flags)
+    if not ok and hasattr(cv2, "findChessboardCornersSB"):
+        try:
+            ok, corners = cv2.findChessboardCornersSB(
+                gray, pattern, flags=cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
+            )
+        except cv2.error:
+            ok = False
     if not ok:
         return None
     term = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 1e-4)
     corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), term)
     return corners
+
+
+def _detect_asymmetric_circles(gray, cols: int, rows: int):
+    pattern = (int(cols), int(rows))
+    flags = cv2.CALIB_CB_ASYMMETRIC_GRID
+    # Blur slightly — helps printed dots under Orbbec noise.
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    ok, centers = cv2.findCirclesGrid(blur, pattern, flags=flags)
+    if not ok:
+        ok, centers = cv2.findCirclesGrid(gray, pattern, flags=flags)
+    if not ok:
+        return None
+    return centers.astype(np.float32)
 
 
 def _detect_charuco(gray, board, detector):
@@ -266,17 +314,36 @@ def _detect_charuco(gray, board, detector):
     return corners, ids
 
 
+def _board_mode(args: argparse.Namespace) -> str:
+    if bool(getattr(args, "charuco", False)):
+        return "charuco"
+    if bool(getattr(args, "asymmetric_circles", False)):
+        return "asymmetric_circles"
+    if bool(getattr(args, "asymmetric_chess", False)):
+        return "asymmetric_chess"
+    # Default: treat unequal cols/rows as asymmetric chess; equal as classic.
+    if int(args.cols) != int(args.rows):
+        return "asymmetric_chess"
+    return "chessboard"
+
+
 def cmd_calibrate(args: argparse.Namespace) -> int:
     pairs = sorted(CALIB_DIR.glob("pair_*_cam0.jpg")) if CALIB_DIR.exists() else []
     if len(pairs) < 4:
         print(f"Need more pairs under {CALIB_DIR} (found {len(pairs)}). Run capture first.")
         return 1
-    use_charuco = bool(args.charuco)
+    mode = _board_mode(args)
+    use_charuco = mode == "charuco"
+    use_asym_circles = mode == "asymmetric_circles"
     obj_points: list[np.ndarray] = []
     img_points0: list[np.ndarray] = []
     img_points1: list[np.ndarray] = []
     image_size = None
     K0_prior = K1_prior = None
+    cols, rows = int(args.cols), int(args.rows)
+    square_mm = float(args.square_mm)
+    board = detector = None
+    objp = None
 
     if use_charuco:
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
@@ -291,11 +358,23 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
             f"ChArUco calibrate: squares={args.squares_x}x{args.squares_y} "
             f"square={args.square_mm}mm marker={args.marker_mm}mm"
         )
+    elif use_asym_circles:
+        if cols < 2 or rows < 2:
+            print("Asymmetric circles need --cols and --rows >= 2")
+            return 2
+        objp = _asymmetric_circle_object_points(cols, rows, square_mm)
+        print(
+            f"Asymmetric CIRCLE grid: {cols}x{rows} circles, spacing={square_mm}mm"
+        )
     else:
-        cols, rows = int(args.cols), int(args.rows)
-        square_mm = float(args.square_mm)
+        if mode == "asymmetric_chess" and cols == rows:
+            print(
+                f"WARNING: asymmetric checkerboard usually has cols != rows "
+                f"(got {cols}x{rows}). Orientation may be ambiguous."
+            )
         objp = _chessboard_object_points(cols, rows, square_mm)
-        print(f"Chessboard calibrate: inner corners {cols}x{rows}, square={square_mm}mm")
+        label = "Asymmetric CHECKERBOARD" if mode == "asymmetric_chess" else "Chessboard"
+        print(f"{label}: inner corners {cols}x{rows}, square={square_mm}mm")
 
     used = 0
     for p0 in pairs:
@@ -342,11 +421,20 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
             obj_points.append(obj)
             img_points0.append(pts0)
             img_points1.append(pts1)
+        elif use_asym_circles:
+            c0 = _detect_asymmetric_circles(g0, cols, rows)
+            c1 = _detect_asymmetric_circles(g1, cols, rows)
+            if c0 is None or c1 is None:
+                print(f"  skip {stem}: asymmetric circles not found in both views")
+                continue
+            obj_points.append(objp.copy())
+            img_points0.append(c0)
+            img_points1.append(c1)
         else:
             c0 = _detect_chessboard(g0, cols, rows)
             c1 = _detect_chessboard(g1, cols, rows)
             if c0 is None or c1 is None:
-                print(f"  skip {stem}: chessboard not found in both views")
+                print(f"  skip {stem}: checkerboard not found in both views")
                 continue
             obj_points.append(objp.copy())
             img_points0.append(c0)
@@ -427,16 +515,41 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         ],
         "rms": float(rms),
         "n_pairs": used,
-        "board": "charuco" if use_charuco else f"chessboard_{args.cols}x{args.rows}",
-        "notes": f"stereoCalibrate {time.strftime('%Y-%m-%d')} rms={rms:.4f} n={used}",
+        "board": f"{mode}_{args.cols}x{args.rows}",
+        "notes": (
+            f"stereoCalibrate mode={mode} {time.strftime('%Y-%m-%d')} "
+            f"rms={rms:.4f} n={used}"
+        ),
     }
     EXTRINSICS_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {EXTRINSICS_PATH}")
-    print(f"RMS={rms:.4f}  ||t||={float(np.linalg.norm(T)):.1f} mm  pairs={used}")
+    print(f"RMS={rms:.4f}  ||t||={float(np.linalg.norm(T)):.1f} mm  pairs={used} mode={mode}")
+    # Mirror into cell_frames when robotics helper is available.
+    try:
+        from cell_frames import (
+            LAYOUT_SCENE_TAPE,
+            apply_scene_stereo_to_cell_frames,
+            load_cell_frames,
+            save_cell_frames,
+        )
+
+        cf = load_cell_frames()
+        apply_scene_stereo_to_cell_frames(
+            cf,
+            np.asarray(R, dtype=np.float64).reshape(3, 3),
+            np.asarray(T, dtype=np.float64).reshape(3),
+        )
+        # Keep a distinct layout name for board-based solves.
+        cf.layout = "asymmetric_board" if "asymmetric" in mode else LAYOUT_SCENE_TAPE
+        save_cell_frames(cf)
+        print(f"Updated {cf.path} layout={cf.layout}")
+    except Exception as exc:
+        print(f"cell_frames update skipped: {exc}")
     if is_extrinsics_placeholder():
-        print("WARNING: still classified as PLACEHOLDER — check R / notes.")
+        print("WARNING: still classified as PLACEHOLDER - check R / notes.")
         return 2
     print("STATUS: real extrinsics ready.")
+    print("Also: python scene_extrinsics_calib.py status")
     print("Live: python depthcamera.py --dual-independent --3d-reproject-assist")
     return 0
 
@@ -457,15 +570,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_cap.set_defaults(func=cmd_capture)
 
     p_cal = sub.add_parser("calibrate", help="Run stereoCalibrate on captured pairs")
-    p_cal.add_argument("--cols", type=int, default=DEFAULT_CHESS_COLS, help="Chessboard inner corners X")
-    p_cal.add_argument("--rows", type=int, default=DEFAULT_CHESS_ROWS, help="Chessboard inner corners Y")
+    p_cal.add_argument(
+        "--cols",
+        type=int,
+        default=DEFAULT_CHESS_COLS,
+        help="Inner corners X (chess) or circles per row (asymmetric circles)",
+    )
+    p_cal.add_argument(
+        "--rows",
+        type=int,
+        default=DEFAULT_CHESS_ROWS,
+        help="Inner corners Y (chess) or circle rows (asymmetric circles)",
+    )
     p_cal.add_argument(
         "--square-mm",
         type=float,
         default=DEFAULT_SQUARE_MM,
-        help="Square size in mm (chessboard or ChArUco)",
+        help="Square size or circle spacing in mm",
     )
-    p_cal.add_argument("--charuco", action="store_true", help="Use ChArUco instead of chessboard")
+    board = p_cal.add_mutually_exclusive_group()
+    board.add_argument(
+        "--asymmetric-chess",
+        action="store_true",
+        help="Asymmetric checkerboard (prefer cols != rows, e.g. 9x6)",
+    )
+    board.add_argument(
+        "--asymmetric-circles",
+        action="store_true",
+        help="Asymmetric circle grid (OpenCV CALIB_CB_ASYMMETRIC_GRID)",
+    )
+    board.add_argument("--charuco", action="store_true", help="Use ChArUco board")
     p_cal.add_argument("--squares-x", type=int, default=DEFAULT_CHARUCO_SQUARES_X)
     p_cal.add_argument("--squares-y", type=int, default=DEFAULT_CHARUCO_SQUARES_Y)
     p_cal.add_argument("--marker-mm", type=float, default=DEFAULT_CHARUCO_MARKER_MM)
